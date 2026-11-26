@@ -538,9 +538,9 @@ pre{background:var(--soft);border:1px solid var(--line);border-radius:6px;paddin
 {{colpick('m_time','Punch date and time','Required.')}}
 {{colpick('m_state','In / Out','Optional. Values like I/O, IN/OUT or 0/1. Choose (none) if the machine marks every punch as In: each person’s punches then alternate In, Out, In… during the day.')}}
 {{colpick('m_device','Device','Optional. Sent to ERPNext as the device id.')}}
-{{colpick('m_name','Employee name','Optional. Only shown in the Punches list.')}}
+{{colpick('m_lng','Longitude','Optional. Decimal degrees (-180 to 180). Choose it together with Latitude.')}}
 {{colpick('m_lat','Latitude','Optional. Decimal degrees (-90 to 90). Sent to ERPNext with the check-in.')}}
-{{colpick('m_lng','Longitude','Optional. Decimal degrees (-180 to 180). Choose it together with Latitude.')}}</div>
+{{colpick('m_name','Employee name','Optional. Only shown in the Punches list.')}}</div>
 {% if sample %}<h3 style="margin-top:22px">First rows of the table</h3><div class=tw style="margin-top:8px"><table><tr>{% for k in sample[0] %}<th>{{k}}{% endfor %}</tr>{% for r in sample %}<tr>{% for v in r.values() %}<td>{{v}}{% endfor %}</tr>{% endfor %}</table></div>{% endif %}</section>
 <section class=panel><h3>Schedule</h3><div class=two>
 <label>Auto sync<select name=auto_sync><option value=1 {{'selected' if c.auto_sync=='1'}}>On<option value=0 {{'selected' if c.auto_sync!='1'}}>Off</select></label>
