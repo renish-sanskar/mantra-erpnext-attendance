@@ -1,0 +1,23 @@
+# local settings and punch data: holds API keys, passwords and the webhook token
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# environments and caches
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+# logs
+*.log
+
+# secrets
+.env
+
+# editors and OS
+.idea/
+.vscode/
+.DS_Store
+.claude/
