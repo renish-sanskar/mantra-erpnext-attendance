@@ -77,15 +77,6 @@ GRANT SELECT ON dbo.tmpdmpTerminalData TO attsync;
 
 The name suggests a temporary dump table that Mantra's software may refill or clear. Every row the app reads is stored in `attendance.db` straight away, so nothing is lost when Mantra clears it, but punches that are cleared before the app reads them are gone. Keep **Auto sync** on, every few minutes.
 
-## Try it without SQL Server
-
-    python3 -m venv .venv
-    .venv/bin/pip install -r requirements.txt
-    .venv/bin/python mock_mantra/make_mock_db.py
-    .venv/bin/python app.py
-
-In **Settings** use `sqlite:/full/path/to/mock_mantra/PayTime.db` as the SQL Server and `tmpdmpTerminalData` as the table. The mock has 10 employees with a check-in around 09:00 and a check-out around 18:00 every day since the 1st. Its column names are placeholders, not Mantra's real ones.
-
 ## Tests
 
     python test_app.py

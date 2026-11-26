@@ -1,13 +1,21 @@
 import json
 import os
-import sys
+import sqlite3
 import tempfile
 from datetime import datetime
 
 import app
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "mock_mantra"))
-import make_mock_db
+
+def create_mock(path):
+    """A small Mantra-like SQLite table: 10 employees, IN at 09:00 and OUT at 18:00 on 12 days. Returns the row count."""
+    rows = [(str(1000 + i), f"Emp {i}", f"2026-11-{d:02d} {h:02d}:00:00", m, "Gate-1")
+            for i in range(1, 11) for d in range(1, 13) for h, m in ((9, "I"), (18, "O"))]
+    with sqlite3.connect(path) as con:
+        con.execute("CREATE TABLE tmpdmpTerminalData (EmployeeCode TEXT, EmployeeName TEXT, PunchDateTime DATETIME, InOutMode TEXT, TerminalName TEXT)")
+        con.executemany("INSERT INTO tmpdmpTerminalData VALUES (?,?,?,?,?)", rows)
+    return len(rows)
+
 
 tmp = tempfile.mkdtemp()
 app.DB = os.path.join(tmp, "t.db")
@@ -41,7 +49,7 @@ except RuntimeError:
 
 # --- mock Mantra table
 mock = os.path.join(tmp, "PayTime.db")
-total = make_mock_db.create(mock)
+total = create_mock(mock)
 assert total > 100
 cfg = {"m_server": "sqlite:" + mock, "m_table": "tmpdmpTerminalData"}
 app.set_cfg(**cfg, start_date="2000-01-01")
@@ -200,7 +208,7 @@ assert len(calls) == 3 and "2 punches left queued" in msg and app.cfg()["last_ok
 
 # --- a machine that marks every punch as In: that column is not used, punches alternate IN, OUT
 mock_in = os.path.join(tmp, "AllIn.db")
-make_mock_db.create(mock_in)
+create_mock(mock_in)
 with sqlite3.connect(mock_in) as con:
     con.execute("UPDATE tmpdmpTerminalData SET InOutMode='I'")
 app.DB = os.path.join(tmp, "t4.db")
