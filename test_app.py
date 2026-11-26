@@ -187,6 +187,30 @@ app.push = down
 msg = app.sync(fetch=False)
 assert len(calls) == 3 and "2 punches left queued" in msg and app.cfg()["last_ok_sync"] == "", (calls, msg)
 
+# --- a machine that marks every punch as In: that column is not used, punches alternate IN, OUT
+mock_in = os.path.join(tmp, "AllIn.db")
+make_mock_db.create(mock_in)
+with sqlite3.connect(mock_in) as con:
+    con.execute("UPDATE tmpdmpTerminalData SET InOutMode='I'")
+app.DB = os.path.join(tmp, "t4.db")
+app.init()
+app.push = fake_push
+r = cl.post("/mantra/detect", data={"m_server": "sqlite:" + mock_in, "m_table": "tmpdmpTerminalData"}, follow_redirects=True)
+assert b"only one value" in r.data and b"not used for In / Out" in r.data
+c = app.cfg()
+assert c["m_state"] == "" and (c["m_emp"], c["m_time"]) == ("EmployeeCode", "PunchDateTime")
+assert json.loads(c["m_values"])["InOutMode"] == ["I"]
+app.set_cfg(start_date="2000-01-01")
+app.sync("manual")
+with app.db() as d:
+    seq = [r[0] for r in d.execute("SELECT log_type FROM log WHERE emp_code='1001' AND substr(punch_time,1,10)=(SELECT MIN(substr(punch_time,1,10)) FROM log WHERE emp_code='1001') ORDER BY punch_time")]
+    types = {r[0] for r in d.execute("SELECT log_type FROM log")}
+assert seq == ["IN", "OUT"] and types == {"IN", "OUT"}, (seq, types)
+app.set_cfg(m_state="InOutMode")  # mapped anyway: the page warns
+assert b"has only one value (I)" in cl.get("/config").data
+assert b"InOutMode (TEXT) \xe2\x80\x93 I" in cl.get("/config").data  # the dropdown shows the values
+app.set_cfg(m_state="")
+
 # --- pages, paging, settings
 with app.db() as d:
     d.executemany("INSERT INTO sync_run(started, trigger) VALUES(?, 'auto')", [("2026-11-01 10:00:00",)] * 120)

@@ -43,6 +43,8 @@ Rules:
 3. Open http://localhost:5001 → **Settings**.
 4. Under **Mantra database** enter the SQL Server (for example `.\Mantra2022`, where the dot means this PC), database, username, password and table. Press **Save and read columns**. The app lists the table's columns and its first rows, and picks the likely ones.
 5. Check the **Columns** choices: employee code and punch date/time are required, In/Out, device and name are optional. Press **Save**.
+
+   **If the machine records every punch as In:** the In / Out dropdown shows the values found in each column. A column with only one value (for example `IN` on every row) says nothing about In or Out, so the app does not pick it. Leave **In / Out** at `(none)`: each person's punches then alternate **In, Out, In…** during the day (first punch In, second Out, and so on). A forgotten punch flips the rest of that day, so check the Punches list now and then.
 6. Under **ERPNext** enter the site address, API key and secret, and the Employee field that holds the punch code. Press **Save and test ERPNext**.
 7. Set **Start syncing from**, turn **Auto sync** on, and press **Sync now** on the dashboard.
 

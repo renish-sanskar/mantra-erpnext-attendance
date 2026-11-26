@@ -16,7 +16,7 @@ http = requests.Session()  # reuses connections across the many small ERPNext ca
 DEFAULTS = {
     "m_server": "", "m_db": "", "m_user": "", "m_pass": "", "m_table": "",
     "m_emp": "", "m_time": "", "m_state": "", "m_device": "", "m_name": "",  # which table column holds what
-    "m_cols": "[]", "m_sample": "[]",  # filled in by "Save and read columns"
+    "m_cols": "[]", "m_sample": "[]", "m_values": "{}",  # filled in by "Save and read columns"
     "erp_url": "http://localhost:8000", "erp_key": "", "erp_secret": "",
     "employee_field": "attendance_device_id",  # Employee field holding the punch code
     "start_date": datetime.now().strftime("%Y-%m-%d"),  # first sync reads from here
@@ -141,6 +141,11 @@ class Mantra:
         cur = self.run(f"SELECT TOP {n} * FROM {self.q(self.table)}" if self.kind == "mssql" else f"SELECT * FROM {self.q(self.table)} LIMIT {n}")
         names = [d[0] for d in cur.description]
         return [dict(zip(names, r)) for r in cur.fetchall()]
+
+    def distinct(self, col, n=6):
+        top, lim = (f"TOP {n} ", "") if self.kind == "mssql" else ("", f" LIMIT {n}")
+        cur = self.run(f"SELECT DISTINCT {top}{self.q(col)} FROM {self.q(self.table)}{lim}")
+        return [("(empty)" if r[0] is None else str(r[0]).strip()) for r in cur.fetchall()]
 
     def rows(self, c, since):
         want = list(dict.fromkeys(c[k] for k in FIELDS if c[k]))
@@ -467,7 +472,7 @@ pre{background:var(--soft);border:1px solid var(--line);border-radius:6px;paddin
 
 {% macro pager(ep, a, n, pages, total) %}{% if total %}<div class=pg><span>Showing {{(n-1)*per+1}}–{{[n*per,total]|min}} of {{total}}</span>
 <span class=pgb>{% if n>1 %}<a class="btn alt" href="{{url_for(ep,**dict(a,page=n-1))}}">Previous</a>{% endif %}<span>Page {{n}} of {{pages}}</span>{% if n<pages %}<a class="btn alt" href="{{url_for(ep,**dict(a,page=n+1))}}">Next</a>{% endif %}</span></div>{% endif %}{% endmacro %}
-{% macro colpick(key, label, hint) %}<label>{{label}}{% if cols %}<select name={{key}}><option value="">(none){% for n,t in cols %}<option value="{{n}}" {{'selected' if c[key]==n}}>{{n}} ({{t}}){% endfor %}</select>{% else %}<input name={{key}} value="{{c[key]}}">{% endif %}<small>{{hint}}</small></label>{% endmacro %}
+{% macro colpick(key, label, hint) %}<label>{{label}}{% if cols %}<select name={{key}}><option value="">(none){% for n,t in cols %}<option value="{{n}}" {{'selected' if c[key]==n}}>{{n}} ({{t}}){% if key=='m_state' and values.get(n) %} – {{values[n]|join(', ')}}{% endif %}{% endfor %}</select>{% else %}<input name={{key}} value="{{c[key]}}">{% endif %}<small>{{hint}}</small></label>{% endmacro %}
 {% macro ind(s) %}<span class="ind {{s}}">{{L[s]}}</span>{% endmacro %}
 {% macro logtable(rows, retry=True, empty='No punches.') %}<div class=tw><table>
 <tr><th>Punch time<th>Code<th>Employee<th>In/Out<th>Device<th>Status<th class=n>Tries<th>Message<th></tr>
@@ -509,10 +514,11 @@ pre{background:var(--soft);border:1px solid var(--line);border-radius:6px;paddin
 <label>API secret<input type=password name=erp_secret autocomplete=new-password placeholder="{{'saved – leave blank to keep' if c.erp_secret}}"></label>
 <label>Employee field with the punch code<input name=employee_field value="{{c.employee_field}}"><small>The punch code from the Mantra table is matched to this field on the Employee.</small></label></section></div>
 <section class=panel><h3>Columns</h3><p class=sub>Tell the app which column of the table holds what. Press “Save and read columns” to list them.</p>
+{% if c.m_state and values.get(c.m_state, [])|length == 1 %}<div class=msg style="border-left-color:var(--warn);margin:14px 0 0">The column “{{c.m_state}}” has only one value ({{values[c.m_state][0]}}), so every punch would be marked that way. Choose (none) for In / Out and each person’s punches will alternate In, Out, In… during the day.</div>{% endif %}
 <div class=two>
 {{colpick('m_emp','Employee code','Required.')}}
 {{colpick('m_time','Punch date and time','Required.')}}
-{{colpick('m_state','In / Out','Optional. Values like I/O, IN/OUT or 0/1. If empty, each person’s punches alternate In, Out, In… during the day.')}}
+{{colpick('m_state','In / Out','Optional. Values like I/O, IN/OUT or 0/1. Choose (none) if the machine marks every punch as In: each person’s punches then alternate In, Out, In… during the day.')}}
 {{colpick('m_device','Device','Optional. Sent to ERPNext as the device id.')}}
 {{colpick('m_name','Employee name','Optional. Only shown in the Punches list.')}}</div>
 {% if sample %}<h3 style="margin-top:22px">First rows of the table</h3><div class=tw style="margin-top:8px"><table><tr>{% for k in sample[0] %}<th>{{k}}{% endfor %}</tr>{% for r in sample %}<tr>{% for v in r.values() %}<td>{{v}}{% endfor %}</tr>{% endfor %}</table></div>{% endif %}</section>
@@ -635,7 +641,7 @@ def cfg_page():
         flash("Saved")
         return redirect(url_for("cfg_page"))
     c = cfg()
-    return render("cfg", cols=json.loads(c["m_cols"]), sample=json.loads(c["m_sample"]))
+    return render("cfg", cols=json.loads(c["m_cols"]), sample=json.loads(c["m_sample"]), values=json.loads(c["m_values"]))
 
 @app.route("/mantra/detect", methods=["POST"])
 def mantra_detect():
@@ -647,8 +653,20 @@ def mantra_detect():
             if not cols:
                 raise ValueError(f"table {c['m_table']!r} not found or has no columns")
             sample, total = m.sample(), m.count()
-        set_cfg(m_cols=json.dumps(cols), m_sample=json.dumps(sample, default=str), **{k: v for k, v in guess(cols).items() if not c[k]})
-        flash(f"Connected. The table has {total} rows and {len(cols)} columns. Check the column choices below.")
+            values = {}
+            for n, t in cols:
+                if t.lower() not in DATE_TYPES:
+                    try:
+                        values[n] = m.distinct(n)
+                    except Exception:
+                        pass  # some column types (text, image) cannot be listed
+        picked = {k: v for k, v in guess(cols).items() if not c[k]}
+        st, note = picked.get("m_state"), ""
+        if st and len(values.get(st, ())) == 1:  # a machine that marks every punch as In: that column says nothing
+            del picked["m_state"]
+            note = f" Column {st} has only one value ({values[st][0]}), so it is not used for In / Out: each person's punches alternate In, Out, In… instead."
+        set_cfg(m_cols=json.dumps(cols), m_sample=json.dumps(sample, default=str), m_values=json.dumps(values), **picked)
+        flash(f"Connected. The table has {total} rows and {len(cols)} columns. Check the column choices below." + note)
     except Exception as e:
         flash(f"Could not read the Mantra database: {e}")
     return redirect(url_for("cfg_page"))
