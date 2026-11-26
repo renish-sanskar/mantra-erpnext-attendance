@@ -218,16 +218,15 @@ def push(c, row):
     emp = active_employee(c, row["emp_code"])
     if not emp:
         return "error", f"No active Employee with {c['employee_field']} = {row['emp_code']}", None, None, None
-    r = http.post(
-        c["erp_url"].rstrip("/") + "/api/method/hrms.hr.doctype.employee_checkin.employee_checkin.add_log_based_on_employee_field",
-        headers={"Authorization": f"token {c['erp_key']}:{c['erp_secret']}"},
-        json={"employee_field_value": emp, "timestamp": row["punch_time"],
-              "device_id": row["device"], "log_type": row["log_type"],
-              "latitude": row["latitude"], "longitude": row["longitude"],  # ERPNext derives geolocation and checks the shift-location radius from these
-              "employee_fieldname": "name"}, timeout=30)
+    doc = {"employee": emp, "time": row["punch_time"], "log_type": row["log_type"], "device_id": row["device"]}
+    for k in ("latitude", "longitude"):  # ERPNext derives geolocation and checks the shift-location radius from these
+        if row[k] is not None:
+            doc[k] = row[k]
+    r = http.post(c["erp_url"].rstrip("/") + "/api/resource/Employee Checkin",  # same call as the old sync script: no custom method involved
+                  headers={"Authorization": f"token {c['erp_key']}:{c['erp_secret']}"}, json=doc, timeout=30)
     if r.ok:
-        m = r.json().get("message") or {}
-        return "ok", "", m.get("employee"), m.get("employee_name"), m.get("name")
+        d = r.json().get("data") or {}
+        return "ok", "", d.get("employee"), d.get("employee_name"), d.get("name")
     msg = r.text[:300]
     if "already has a log" in msg:
         return "duplicate", "already in ERPNext", None, None, None

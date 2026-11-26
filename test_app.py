@@ -84,7 +84,7 @@ except ValueError:
     pass
 
 # --- employee lookup: Active only, one request per code, errors surface as ERPDown
-real_http, seen = app.http, []
+real_http, seen, posted = app.http, [], []
 
 
 class FakeHttp:
@@ -95,6 +95,10 @@ class FakeHttp:
         seen.append(json.loads(kw["params"]["filters"]))
         return type("R", (), {"ok": self.status == 200, "status_code": self.status, "text": "boom", "json": lambda s: {"data": self.data}})()
 
+    def post(self, url, **kw):
+        posted.append((url, kw["json"]))
+        return type("R", (), {"ok": True, "status_code": 200, "text": "", "json": lambda s: {"data": {"name": "EC-1", "employee": "HR-EMP-1", "employee_name": "A"}}})()
+
 
 c0 = {"erp_url": "http://x", "erp_key": "k", "erp_secret": "s", "employee_field": "attendance_device_id"}
 app.http = FakeHttp(data=[{"name": "HR-EMP-1"}])
@@ -103,6 +107,14 @@ assert seen[0] == [["attendance_device_id", "=", "55"], ["status", "=", "Active"
 app.http = FakeHttp(data=[])
 assert app.active_employee(c0, "66") is None
 assert app.push(c0, {"emp_code": "66"})[:2] == ("error", "No active Employee with attendance_device_id = 66")
+# the check-in goes out in the same format as the old sync script: POST /api/resource/Employee Checkin with the punch's own time
+app.http = FakeHttp(data=[{"name": "HR-EMP-1"}])
+row = {"emp_code": "88", "punch_time": "2020-08-20 16:32:00", "log_type": "IN", "device": "1", "latitude": None, "longitude": None}
+assert app.push(dict(c0), row) == ("ok", "", "HR-EMP-1", "A", "EC-1")
+assert posted[-1] == ("http://x/api/resource/Employee Checkin",
+                      {"employee": "HR-EMP-1", "time": "2020-08-20 16:32:00", "log_type": "IN", "device_id": "1"}), posted[-1]  # no coordinates: no keys
+app.push(dict(c0), {**row, "latitude": 23.5, "longitude": 72.5})
+assert posted[-1][1]["latitude"] == 23.5 and posted[-1][1]["longitude"] == 72.5
 app.http = FakeHttp(status=403)
 try:
     app.active_employee(c0, "77")
