@@ -137,7 +137,7 @@ app.push = fake_push
 
 assert "Choose the employee" in app.sync("manual")  # columns not mapped yet
 r = cl.post("/mantra/detect", data={"m_server": "sqlite:" + mock, "m_table": "tmpdmpTerminalData"}, follow_redirects=True)
-assert b"Connected. The table has" in r.data and b"EmployeeCode" in r.data and b"First rows of the table" in r.data
+assert b"Connected. The table has" in r.data and b"EmployeeCode" in r.data and b"rows of the table" in r.data
 c = app.cfg()
 assert (c["m_emp"], c["m_time"], c["m_state"]) == ("EmployeeCode", "PunchDateTime", "InOutMode")
 
@@ -254,7 +254,58 @@ assert seq == ["IN", "OUT"] and types == {"IN", "OUT"}, (seq, types)
 app.set_cfg(m_state="InOutMode")  # mapped anyway: the page warns
 assert b"has only one value (I)" in cl.get("/config").data
 assert b"InOutMode (TEXT) \xe2\x80\x93 I" in cl.get("/config").data  # the dropdown shows the values
+with app.db() as d:
+    d.execute("DELETE FROM log")
+app.set_cfg(m_state="InOutMode", last_sync="")  # still mapped, but all-"I": sync alternates by itself
+app.sync("manual")
+with app.db() as d:
+    assert {r[0] for r in d.execute("SELECT log_type FROM log")} == {"IN", "OUT"}
 app.set_cfg(m_state="")
+r = cl.post("/console", data={"sql": "SELECT COUNT(*) AS n FROM tmpdmpTerminalData"})
+assert b"<th>n" in r.data and b"1 row" in r.data
+for bad in ("DELETE FROM tmpdmpTerminalData", "SELECT 1; DROP TABLE x", "SELECT * INTO y FROM tmpdmpTerminalData", "SELECT 1 -- x"):
+    assert b"Only one read-only" in cl.post("/console", data={"sql": bad}).data, bad
+assert b"Console" in cl.get("/console").data
+
+# --- "Alternate IN / OUT" checkbox: ignores a Mode column that does say IN and OUT
+mock_alt = os.path.join(tmp, "Alt.db")
+create_mock(mock_alt)
+with sqlite3.connect(mock_alt) as con:
+    con.execute("INSERT INTO tmpdmpTerminalData VALUES ('1001','E','2026-11-01 12:00:00','I','G')")  # 09 I, 12 I, 18 O
+
+
+def day_types(checked):
+    app.DB = os.path.join(tmp, f"alt{checked}.db")
+    app.init()
+    app.push = fake_push
+    app.set_cfg(m_server="sqlite:" + mock_alt, m_table="tmpdmpTerminalData", m_emp="EmployeeCode", m_time="PunchDateTime",
+                m_state="InOutMode", start_date="2000-01-01", m_cols=json.dumps([("PunchDateTime", "DATETIME")]))
+    cl.post("/config", data={"alt_inout": ["1", "0"] if checked else "0"})  # a ticked box is sent before the hidden 0
+    app.sync("manual")
+    with app.db() as d:
+        return [r[0] for r in d.execute("SELECT log_type FROM log WHERE emp_code='1001' AND substr(punch_time,1,10)='2026-11-01' ORDER BY punch_time")]
+
+
+assert day_types(False) == ["IN", "IN", "OUT"]
+assert day_types(True) == ["IN", "OUT", "IN"]
+
+# --- punches within N minutes of a group's first punch share its In / Out
+app.DB = os.path.join(tmp, "gap.db")
+app.init()
+app.set_cfg(min_gap="3")
+P = lambda hm, e="7": {"emp_code": e, "punch_time": f"2026-11-01 {hm}"}
+assert app.ingest([P("09:00:00"), P("09:02:00"), P("09:04:00"), P("09:00:30", "8")], "x")[0] == 4
+assert app.ingest([P("09:05:00"), P("09:07:30")], "x")[0] == 2
+with app.db() as d:
+    got = [tuple(r) for r in d.execute("SELECT substr(punch_time,12,5), log_type FROM log WHERE emp_code='7' ORDER BY punch_time")]
+assert got == [("09:00", "IN"), ("09:02", "IN"), ("09:04", "OUT"), ("09:05", "OUT"), ("09:07", "IN")], got
+app.set_cfg(min_gap="0")
+
+app.set_cfg(alt_inout="0")
+assert b'id=gapbox style="display:none"' in cl.get("/config").data
+app.set_cfg(alt_inout="1")
+assert b'id=gapbox style=""' in cl.get("/config").data
+app.set_cfg(alt_inout="0")
 
 # --- pages, paging, settings
 with app.db() as d:

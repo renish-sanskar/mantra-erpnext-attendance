@@ -20,7 +20,7 @@ DEFAULTS = {
     "erp_url": "http://localhost:8000", "erp_key": "", "erp_secret": "",
     "employee_field": "attendance_device_id",  # Employee field holding the punch code
     "start_date": datetime.now().strftime("%Y-%m-%d"),  # first sync reads from here
-    "interval_min": "5", "auto_sync": "0", "last_sync": "", "lookback_days": "1",
+    "interval_min": "5", "auto_sync": "0", "alt_inout": "0", "min_gap": "0", "last_sync": "", "lookback_days": "1",
     "webhook_token": secrets.token_urlsafe(16), "last_ok_sync": "",
 }
 # columns added after v1: (name, ddl) -> applied to an existing db by init()
@@ -182,6 +182,13 @@ def fetch_punches(c, since):
     if not (c["m_emp"] and c["m_time"]):
         raise ValueError("Choose the employee code and punch time columns in Settings first")
     with closing(Mantra(c)) as m:
+        state = c["m_state"] if c["alt_inout"] != "1" else ""  # checkbox in Settings: ignore the column, alternate IN, OUT
+        if state:  # a column that never says both IN and OUT (all "I", or an unknown OUT code) is useless: alternate instead
+            try:
+                if len({parse_state(v) for v in m.distinct(state, 50)} - {None}) < 2:
+                    state = ""
+            except Exception:
+                pass  # column can't be listed: trust it
         for r in m.rows(c, since):
             try:
                 if parse_time(r[c["m_time"]]) < since:
@@ -189,7 +196,7 @@ def fetch_punches(c, since):
             except ValueError:
                 pass  # unreadable time: let ingest count it
             yield {"emp_code": r[c["m_emp"]], "punch_time": r[c["m_time"]],
-                   "log_type": r[c["m_state"]] if c["m_state"] else None,
+                   "log_type": r[state] if state else None,
                    "device": r[c["m_device"]] if c["m_device"] else "", "name": r[c["m_name"]] if c["m_name"] else "",
                    "latitude": r[c["m_lat"]] if c["m_lat"] else None, "longitude": r[c["m_lng"]] if c["m_lng"] else None}
 
@@ -330,17 +337,27 @@ def ingest(punches, ts, strict=False):
             bad += 1
             continue
         rows[r["tx_id"]] = r
-    out, count = [], {}
+    out, state, f = [], {}, "%Y-%m-%d %H:%M:%S"
+    try:
+        gap = timedelta(minutes=max(int(cfg()["min_gap"]), 0))
+    except ValueError:
+        gap = timedelta(0)
     with db() as d:
         for r in sorted(rows.values(), key=lambda r: r["punch_time"]):
             if d.execute("SELECT 1 FROM log WHERE tx_id=?", (r["tx_id"],)).fetchone():
                 continue
             if not r["log_type"]:  # ponytail: no In/Out given, so a person's day alternates IN, OUT, IN...; one missed punch flips the rest of that day
                 k = (r["emp_code"], r["punch_time"][:10])
-                if k not in count:
-                    count[k] = d.execute("SELECT COUNT(*) FROM log WHERE emp_code=? AND substr(punch_time,1,10)=?", k).fetchone()[0]
-                r["log_type"] = "IN" if count[k] % 2 == 0 else "OUT"
-                count[k] += 1
+                if k not in state:  # [start of the current group, groups so far]: punches within the gap of a group's first punch share its IN/OUT
+                    state[k] = [None, 0]
+                    for (pt,) in d.execute("SELECT punch_time FROM log WHERE emp_code=? AND substr(punch_time,1,10)=? ORDER BY punch_time", k):
+                        t = datetime.strptime(pt, f)
+                        if state[k][0] is None or t - state[k][0] > gap:
+                            state[k] = [t, state[k][1] + 1]
+                t = datetime.strptime(r["punch_time"], f)
+                if state[k][0] is None or t - state[k][0] > gap:
+                    state[k] = [t, state[k][1] + 1]
+                r["log_type"] = "IN" if state[k][1] % 2 else "OUT"
             out.append((r["tx_id"], r["emp_code"], r["punch_time"], r["log_type"], r["device"], r["name"] or None, r["latitude"], r["longitude"], ts, ts))
         before = d.total_changes
         d.executemany(
@@ -472,7 +489,7 @@ td.wrap{white-space:normal;max-width:330px;color:var(--mut);font-size:12px}td.n,
 .num.ok span:before{background:var(--ok)}.num.error span:before{background:var(--err)}.num.duplicate span:before{background:var(--warn)}
 .panel{background:var(--card);border:1px solid var(--line);border-radius:6px;padding:20px 22px}
 label{display:block;color:var(--mut);margin:14px 0 6px}label small{display:block;margin-top:3px;font-size:12px}
-input,select{height:36px;padding:0 12px;border:1px solid var(--line);border-radius:6px;background:var(--soft);color:var(--ink);font:inherit;width:100%}
+input,select,textarea{height:36px;padding:0 12px;border:1px solid var(--line);border-radius:6px;background:var(--soft);color:var(--ink);font:inherit;width:100%}
 input:focus,select:focus{outline:0;border-color:var(--blue);background:var(--card)}input[readonly]{font-family:ui-monospace,Consolas,monospace;font-size:12px}
 button,.btn{background:var(--blue);color:#fff;border:1px solid var(--blue);padding:7px 16px;border-radius:6px;cursor:pointer;font:inherit;text-decoration:none;display:inline-block;white-space:nowrap;line-height:20px}
 button:hover,.btn:hover{opacity:.9}button:disabled{opacity:.55;cursor:default}button.sm{padding:3px 12px;font-size:12px;line-height:18px}
@@ -489,7 +506,7 @@ pre{background:var(--soft);border:1px solid var(--line);border-radius:6px;paddin
 </style></head><body>
 <header><div class=bar>
 <a class=brand href="{{url_for('dash')}}"><img src="{{url_for('static',filename='mantra.svg')}}" alt="Mantra" title="Mantra"><span class=arr>→</span><img src="{{url_for('static',filename='erpnext.svg')}}" alt=ERPNext title=ERPNext><b>Attendance Sync</b></a>
-<nav>{% for p,e,l in [('dash','dash','Dashboard'),('logs','logs','Punches'),('runs','runs_page','Sync history'),('cfg','cfg_page','Settings')] %}<a href="{{url_for(e)}}" class="{{'on' if page==p}}">{{l}}</a>{% endfor %}</nav>
+<nav>{% for p,e,l in [('dash','dash','Dashboard'),('logs','logs','Punches'),('runs','runs_page','Sync history'),('console','console','Console'),('cfg','cfg_page','Settings')] %}<a href="{{url_for(e)}}" class="{{'on' if page==p}}">{{l}}</a>{% endfor %}</nav>
 <span class=state>{% if running %}<span class=dot></span>Sync running…{% elif c.auto_sync=='1' %}Auto sync every {{c.interval_min}} min{% else %}Auto sync is off{% endif %}</span></div></header>
 <main>{% for m in get_flashed_messages() %}<div class=msg>{{m}}</div>{% endfor %}
 
@@ -523,6 +540,13 @@ pre{background:var(--soft);border:1px solid var(--line);border-radius:6px;paddin
 
 {% elif page=='runs' %}<div class=ph><div><h2>Sync history</h2><p class=sub>Every time the app read and pushed punches.</p></div></div>{{runtable(runs)}}{{pager('runs_page', a, page_no, pages, total)}}
 
+{% elif page=='console' %}<div class=ph><div><h2>Console</h2><p class=sub>Run a read-only SELECT on the Mantra database (first {{limit}} rows are shown).</p></div></div>
+<form method=post class="panel"><label style="margin-top:0">SQL<textarea name=sql spellcheck=false style="height:130px;padding:10px 12px;font:12px/1.5 ui-monospace,Consolas,monospace">{{sql}}</textarea></label>
+<div class=bar2 style="margin-top:14px"><button>Run</button></div></form>
+{% if err %}<div class=msg style="border-left-color:var(--err);margin:16px 0 0">{{err}}</div>{% endif %}
+{% if qcols %}<div class=sec><h3>{{qrows|length}} row{{'' if qrows|length==1 else 's'}}{{' (more rows were cut off)' if cut}}</h3></div>
+<div class=tw><table><tr>{% for k in qcols %}<th>{{k}}{% endfor %}</tr>{% for r in qrows %}<tr>{% for v in r %}<td>{{v}}{% endfor %}</tr>{% else %}<tr><td colspan={{qcols|length}} class=empty>No rows.</tr>{% endfor %}</table></div>{% endif %}
+
 {% else %}<div class=ph><div><h2>Settings</h2><p class=sub>Connection details are stored in this app's local database.</p></div></div><form method=post class=stack>
 <div class=two>
 <section class=panel><div class=hd><img src="{{url_for('static',filename='mantra.svg')}}" alt=""><h3>Mantra database</h3></div>
@@ -542,11 +566,13 @@ pre{background:var(--soft);border:1px solid var(--line);border-radius:6px;paddin
 {{colpick('m_emp','Employee code','Required.')}}
 {{colpick('m_time','Punch date and time','Required.')}}
 {{colpick('m_state','In / Out','Optional. Values like I/O, IN/OUT or 0/1. Choose (none) if the machine marks every punch as In: each person’s punches then alternate In, Out, In… during the day.')}}
+<label style="color:var(--ink)"><input type=checkbox name=alt_inout value=1 {{'checked' if c.alt_inout=='1'}} onchange="document.getElementById('gapbox').style.display=this.checked?'':'none'" style="width:auto;height:auto;vertical-align:-2px;margin-right:6px"><input type=hidden name=alt_inout value=0>Alternate IN / OUT<small style="color:var(--mut)">Ignore the In / Out column and mark each person’s punches of the day IN, OUT, IN, OUT… in time order.</small></label>
+<label id=gapbox style="{{'' if c.alt_inout=='1' else 'display:none'}}">Same In / Out within (minutes)<input type=number min=0 name=min_gap value="{{c.min_gap}}"><small>Punches by the same person within this many minutes of the first one get the same In / Out (09:00 In, 09:02 In, then the next punch after that is Out). Use 0 to switch it off.</small></label>
 {{colpick('m_device','Device','Optional. Sent to ERPNext as the device id.')}}
 {{colpick('m_lng','Longitude','Optional. Decimal degrees (-180 to 180). Choose it together with Latitude.')}}
 {{colpick('m_lat','Latitude','Optional. Decimal degrees (-90 to 90). Sent to ERPNext with the check-in.')}}
 {{colpick('m_name','Employee name','Optional. Only shown in the Punches list.')}}</div>
-{% if sample %}<h3 style="margin-top:22px">First rows of the table</h3><div class=tw style="margin-top:8px"><table><tr>{% for k in sample[0] %}<th>{{k}}{% endfor %}</tr>{% for r in sample %}<tr>{% for v in r.values() %}<td>{{v}}{% endfor %}</tr>{% endfor %}</table></div>{% endif %}</section>
+{% if sample %}<h3 style="margin-top:22px">{{sample|length}} rows of the table (the first {{sample_max}} are shown; use Console for more)</h3><div class=tw style="margin-top:8px;max-height:480px;overflow-y:auto"><table><tr>{% for k in sample[0] %}<th>{{k}}{% endfor %}</tr>{% for r in sample %}<tr>{% for v in r.values() %}<td>{{v}}{% endfor %}</tr>{% endfor %}</table></div>{% endif %}</section>
 <section class=panel><h3>Schedule</h3><div class=two>
 <label>Auto sync<select name=auto_sync><option value=1 {{'selected' if c.auto_sync=='1'}}>On<option value=0 {{'selected' if c.auto_sync!='1'}}>Off</select></label>
 <label>Run every (minutes)<input type=number min=1 name=interval_min value="{{c.interval_min}}"></label>
@@ -616,6 +642,44 @@ def runs_page():
 
 
 
+CONSOLE_ROWS = 200
+SAMPLE_ROWS = 1000  # Settings preview; ponytail: stored in config as JSON, raise only if the page stays fast
+SQL_BAD = re.compile(r"\b(insert|update|delete|drop|alter|create|truncate|exec|execute|merge|grant|revoke|into|backup|restore|shutdown|waitfor|openrowset|opendatasource|xp_\w+|sp_\w+)\b", re.I)
+
+
+def safe_select(sql):
+    sql = sql.strip().rstrip(";").strip()
+    if not re.match(r"(select|with)\b", sql, re.I) or ";" in sql or "--" in sql or "/*" in sql or SQL_BAD.search(sql):
+        raise ValueError("Only one read-only SELECT is allowed (no ; comments, INSERT, UPDATE, DELETE, EXEC, INTO...)")
+    return sql  # ponytail: keyword filter, not a parser; the real guard is a SQL user with SELECT-only rights (see README)
+
+
+def cell(v):
+    if v is None:
+        return "NULL"
+    return f"<{len(v)} bytes>" if isinstance(v, (bytes, bytearray)) else str(v)[:200]
+
+
+@app.route("/console", methods=["GET", "POST"])
+def console():
+    c = cfg()
+    sql = request.form.get("sql") or (f"SELECT TOP 100 * FROM {c['m_table']}" if c["m_table"] else "")
+    qcols, qrows, err, cut = [], [], "", False
+    if request.method == "POST":
+        try:
+            with closing(Mantra(c)) as m:
+                if m.kind == "mssql":
+                    m.con.timeout = 30
+                cur = m.run(safe_select(sql))
+                qcols = [d[0] for d in cur.description]
+                rows = cur.fetchmany(CONSOLE_ROWS + 1)
+            cut = len(rows) > CONSOLE_ROWS
+            qrows = [[cell(v) for v in r] for r in rows[:CONSOLE_ROWS]]
+        except Exception as e:
+            err = str(e)[:500]
+    return render("console", sql=sql, qcols=qcols, qrows=qrows, err=err, cut=cut, limit=CONSOLE_ROWS)
+
+
 @app.route("/api/punches", methods=["POST"])
 def receive_punches():
     tok = request.headers.get("X-Token") or request.args.get("token", "")
@@ -666,7 +730,7 @@ def cfg_page():
         flash("Saved")
         return redirect(url_for("cfg_page"))
     c = cfg()
-    return render("cfg", cols=json.loads(c["m_cols"]), sample=json.loads(c["m_sample"]), values=json.loads(c["m_values"]))
+    return render("cfg", cols=json.loads(c["m_cols"]), sample=json.loads(c["m_sample"]), sample_max=SAMPLE_ROWS, values=json.loads(c["m_values"]))
 
 @app.route("/mantra/detect", methods=["POST"])
 def mantra_detect():
@@ -677,7 +741,7 @@ def mantra_detect():
             cols = m.columns()
             if not cols:
                 raise ValueError(f"table {c['m_table']!r} not found or has no columns")
-            sample, total = m.sample(), m.count()
+            sample, total = m.sample(SAMPLE_ROWS), m.count()
             values = {}
             for n, t in cols:
                 if t.lower() not in DATE_TYPES:
@@ -690,7 +754,7 @@ def mantra_detect():
         if st and len(values.get(st, ())) == 1:  # a machine that marks every punch as In: that column says nothing
             del picked["m_state"]
             note = f" Column {st} has only one value ({values[st][0]}), so it is not used for In / Out: each person's punches alternate In, Out, In… instead."
-        set_cfg(m_cols=json.dumps(cols), m_sample=json.dumps(sample, default=str), m_values=json.dumps(values), **picked)
+        set_cfg(m_cols=json.dumps(cols), m_sample=json.dumps(sample, default=cell), m_values=json.dumps(values), **picked)
         flash(f"Connected. The table has {total} rows and {len(cols)} columns. Check the column choices below." + note)
     except Exception as e:
         flash(f"Could not read the Mantra database: {e}")
