@@ -15,7 +15,7 @@ http = requests.Session()  # reuses connections across the many small ERPNext ca
 
 DEFAULTS = {
     "m_server": "", "m_db": "", "m_user": "", "m_pass": "", "m_table": "",
-    "m_emp": "", "m_time": "", "m_state": "", "m_device": "", "m_name": "",  # which table column holds what
+    "m_emp": "", "m_time": "", "m_state": "", "m_device": "", "m_name": "", "m_lat": "", "m_lng": "",  # which table column holds what
     "m_cols": "[]", "m_sample": "[]", "m_values": "{}",  # filled in by "Save and read columns"
     "erp_url": "http://localhost:8000", "erp_key": "", "erp_secret": "",
     "employee_field": "attendance_device_id",  # Employee field holding the punch code
@@ -25,7 +25,8 @@ DEFAULTS = {
 }
 # columns added after v1: (name, ddl) -> applied to an existing db by init()
 LOG_COLS = {"employee": "TEXT", "employee_name": "TEXT", "checkin": "TEXT",
-            "attempts": "INTEGER DEFAULT 0", "run_id": "INTEGER", "created": "TEXT"}
+            "attempts": "INTEGER DEFAULT 0", "run_id": "INTEGER", "created": "TEXT",
+            "latitude": "REAL", "longitude": "REAL"}
 
 
 @contextmanager
@@ -80,12 +81,13 @@ def set_cfg(**kw):
             c.execute("INSERT OR REPLACE INTO config VALUES(?,?)", (k, v))
 
 
-FIELDS = ("m_emp", "m_time", "m_state", "m_device", "m_name")
+FIELDS = ("m_emp", "m_time", "m_state", "m_device", "m_name", "m_lat", "m_lng")
 GUESS = {"m_emp": ("empcode", "employeecode", "empid", "userid", "enroll", "cardno", "emp", "user", "pin"),
          "m_time": ("inouttime", "punchdatetime", "datetime", "logtime", "punchtime", "punch", "date"),
          "m_state": ("inout", "state", "status", "mode", "direction", "type"),
          "m_device": ("terminal", "device", "machine", "reader"),
-         "m_name": ("employeename", "empname", "username", "name")}
+         "m_name": ("employeename", "empname", "username", "name"),
+         "m_lat": ("latitude", "lat"), "m_lng": ("longitude", "lng", "long")}
 DATE_TYPES = ("datetime", "datetime2", "smalldatetime", "date")
 DRIVERS = ("ODBC Driver 18 for SQL Server", "ODBC Driver 17 for SQL Server", "ODBC Driver 13 for SQL Server",
            "SQL Server Native Client 11.0", "SQL Server")  # newest first; the last one ships with Windows
@@ -187,7 +189,8 @@ def fetch_punches(c, since):
                 pass  # unreadable time: let ingest count it
             yield {"emp_code": r[c["m_emp"]], "punch_time": r[c["m_time"]],
                    "log_type": r[c["m_state"]] if c["m_state"] else None,
-                   "device": r[c["m_device"]] if c["m_device"] else "", "name": r[c["m_name"]] if c["m_name"] else ""}
+                   "device": r[c["m_device"]] if c["m_device"] else "", "name": r[c["m_name"]] if c["m_name"] else "",
+                   "latitude": r[c["m_lat"]] if c["m_lat"] else None, "longitude": r[c["m_lng"]] if c["m_lng"] else None}
 
 
 class ERPDown(Exception):
@@ -219,6 +222,7 @@ def push(c, row):
         headers={"Authorization": f"token {c['erp_key']}:{c['erp_secret']}"},
         json={"employee_field_value": emp, "timestamp": row["punch_time"],
               "device_id": row["device"], "log_type": row["log_type"],
+              "latitude": row["latitude"], "longitude": row["longitude"],  # ERPNext derives geolocation and checks the shift-location radius from these
               "employee_fieldname": "name"}, timeout=30)
     if r.ok:
         m = r.json().get("message") or {}
@@ -282,27 +286,41 @@ def pick(p, *keys):
     return next((p[k] for k in keys if p.get(k) not in (None, "")), None)
 
 
-def standardize(p):
+def coord(v, limit):
+    if v in (None, ""):
+        return None
+    f = float(v)
+    if not -limit <= f <= limit:
+        raise ValueError(f"coordinate {v!r} out of range")
+    return f
+
+
+def standardize(p, strict=False):
     """Standard punch payload -> our row. Raises KeyError/ValueError/TypeError when unusable.
-    Keys (any case): emp_code and punch_time are required; log_type (IN/OUT), device and name are optional.
+    Keys (any case): emp_code and punch_time are required; log_type (IN/OUT), device, name, latitude and longitude are optional.
+    strict (the API): log_type, when given, must be IN or OUT; otherwise machine codes like I/O/0/1 are understood too.
     Easy TimePro style keys (PUNCH_DATETIME, PUNCH_STATE, TERMINAL_ALIAS, FIRST_NAME) are accepted too."""
     p = {str(k).lower(): v for k, v in p.items()}
     code = txt(pick(p, "emp_code", "employee_code"))
     if not code:
         raise ValueError("emp_code missing")
     ts = parse_time(pick(p, "punch_datetime", "punch_time", "timestamp")).strftime("%Y-%m-%d %H:%M:%S")
+    lt = pick(p, "log_type", "punch_state", "state")
+    if strict and lt is not None and txt(lt).upper() not in ("IN", "OUT"):
+        raise ValueError(f"log_type must be IN or OUT, got {lt!r}")
     return {"tx_id": f"{code}|{ts}", "emp_code": code, "punch_time": ts,
-            "log_type": parse_state(pick(p, "log_type", "punch_state", "state")),
+            "log_type": parse_state(lt),
             "device": txt(pick(p, "device", "device_id", "terminal_alias", "terminal_sn")),
+            "latitude": coord(pick(p, "latitude", "lat"), 90), "longitude": coord(pick(p, "longitude", "lng", "lon", "long"), 180),
             "name": txt(pick(p, "name", "employee_name")) or " ".join(filter(None, [txt(p.get("first_name")), txt(p.get("last_name"))]))}
 
 
-def ingest(punches, ts):
+def ingest(punches, ts, strict=False):
     """Store punches as pending; returns (new, unreadable). A punch already stored (same employee and time) is ignored."""
     rows, bad = {}, 0
     for p in punches:  # may read a big table: do it before taking the DB write lock
         try:
-            r = standardize(p)
+            r = standardize(p, strict)
         except (KeyError, ValueError, AttributeError, TypeError):
             bad += 1
             continue
@@ -318,11 +336,11 @@ def ingest(punches, ts):
                     count[k] = d.execute("SELECT COUNT(*) FROM log WHERE emp_code=? AND substr(punch_time,1,10)=?", k).fetchone()[0]
                 r["log_type"] = "IN" if count[k] % 2 == 0 else "OUT"
                 count[k] += 1
-            out.append((r["tx_id"], r["emp_code"], r["punch_time"], r["log_type"], r["device"], r["name"] or None, ts, ts))
+            out.append((r["tx_id"], r["emp_code"], r["punch_time"], r["log_type"], r["device"], r["name"] or None, r["latitude"], r["longitude"], ts, ts))
         before = d.total_changes
         d.executemany(
-            "INSERT OR IGNORE INTO log(tx_id, emp_code, punch_time, log_type, device, employee_name, status, message, attempts, created, updated)"
-            " VALUES(?,?,?,?,?,?,'pending','',0,?,?)", out)
+            "INSERT OR IGNORE INTO log(tx_id, emp_code, punch_time, log_type, device, employee_name, latitude, longitude, status, message, attempts, created, updated)"
+            " VALUES(?,?,?,?,?,?,?,?,'pending','',0,?,?)", out)
         return d.total_changes - before, bad
 
 
@@ -475,11 +493,11 @@ pre{background:var(--soft);border:1px solid var(--line);border-radius:6px;paddin
 {% macro colpick(key, label, hint) %}<label>{{label}}{% if cols %}<select name={{key}}><option value="">(none){% for n,t in cols %}<option value="{{n}}" {{'selected' if c[key]==n}}>{{n}} ({{t}}){% if key=='m_state' and values.get(n) %} – {{values[n]|join(', ')}}{% endif %}{% endfor %}</select>{% else %}<input name={{key}} value="{{c[key]}}">{% endif %}<small>{{hint}}</small></label>{% endmacro %}
 {% macro ind(s) %}<span class="ind {{s}}">{{L[s]}}</span>{% endmacro %}
 {% macro logtable(rows, retry=True, empty='No punches.') %}<div class=tw><table>
-<tr><th>Punch time<th>Code<th>Employee<th>In/Out<th>Device<th>Status<th class=n>Tries<th>Message<th></tr>
-{% for r in rows %}<tr><td>{{r.punch_time}}<td>{{r.emp_code}}<td>{{r.employee_name or r.employee or '–'}}<td>{{r.log_type|title}}<td>{{r.device or '–'}}
+<tr><th>Punch time<th>Code<th>Employee<th>In/Out<th>Device<th>Location<th>Status<th class=n>Tries<th>Message<th></tr>
+{% for r in rows %}<tr><td>{{r.punch_time}}<td>{{r.emp_code}}<td>{{r.employee_name or r.employee or '–'}}<td>{{r.log_type|title}}<td>{{r.device or '–'}}<td>{% if r.latitude is not none and r.longitude is not none %}<a href="https://www.google.com/maps?q={{r.latitude}},{{r.longitude}}" target=_blank rel=noopener>{{'%.5f'|format(r.latitude)}}, {{'%.5f'|format(r.longitude)}}</a>{% else %}–{% endif %}
 <td>{{ind(r.status)}}<td class=n>{{r.attempts or 0}}<td class=wrap>{{r.message}}
 <td>{% if retry and r.status in ('error','pending') %}<form method=post action="{{url_for('retry',tx_id=r.tx_id)}}"><button class="sm alt">Retry</button></form>{% endif %}</tr>
-{% else %}<tr><td colspan=9 class=empty>{{empty}}</tr>{% endfor %}</table></div>{% endmacro %}
+{% else %}<tr><td colspan=10 class=empty>{{empty}}</tr>{% endfor %}</table></div>{% endmacro %}
 
 {% if page=='dash' %}<div class=ph><div><h2>Dashboard</h2><p class=sub>Punches are read from the Mantra database and added to ERPNext as Employee Checkins.</p></div>
 <form method=post action="{{url_for('do_sync')}}"><button {{'disabled' if running}}>{{'Syncing…' if running else 'Sync now'}}</button></form></div>
@@ -520,7 +538,9 @@ pre{background:var(--soft);border:1px solid var(--line);border-radius:6px;paddin
 {{colpick('m_time','Punch date and time','Required.')}}
 {{colpick('m_state','In / Out','Optional. Values like I/O, IN/OUT or 0/1. Choose (none) if the machine marks every punch as In: each person’s punches then alternate In, Out, In… during the day.')}}
 {{colpick('m_device','Device','Optional. Sent to ERPNext as the device id.')}}
-{{colpick('m_name','Employee name','Optional. Only shown in the Punches list.')}}</div>
+{{colpick('m_name','Employee name','Optional. Only shown in the Punches list.')}}
+{{colpick('m_lat','Latitude','Optional. Decimal degrees (-90 to 90). Sent to ERPNext with the check-in.')}}
+{{colpick('m_lng','Longitude','Optional. Decimal degrees (-180 to 180). Choose it together with Latitude.')}}</div>
 {% if sample %}<h3 style="margin-top:22px">First rows of the table</h3><div class=tw style="margin-top:8px"><table><tr>{% for k in sample[0] %}<th>{{k}}{% endfor %}</tr>{% for r in sample %}<tr>{% for v in r.values() %}<td>{{v}}{% endfor %}</tr>{% endfor %}</table></div>{% endif %}</section>
 <section class=panel><h3>Schedule</h3><div class=two>
 <label>Auto sync<select name=auto_sync><option value=1 {{'selected' if c.auto_sync=='1'}}>On<option value=0 {{'selected' if c.auto_sync!='1'}}>Off</select></label>
@@ -529,7 +549,7 @@ pre{background:var(--soft);border:1px solid var(--line);border-radius:6px;paddin
 <label>Start syncing from<input type=date name=start_date value="{{c.start_date}}"><small>If you change this date, the next sync reads everything since then again. Punches already in ERPNext are skipped.</small></label></div></section>
 <section class=panel><h3>Receive punches by POST</h3><p class=sub>Any machine or script can send punches in the standard payload (a JSON list) to this address. Click it to select:</p>
 <label style="margin-top:8px"><input readonly onclick="this.select()" value="{{request.host_url}}api/punches?token={{c.webhook_token}}"></label>
-<pre>[{"emp_code": "1234", "punch_time": "2026-11-25 09:00:00", "log_type": "IN", "device": "Gate-1", "name": "Asha Patel"}]</pre>
+<pre>[{"emp_code": "1234", "punch_time": "2026-11-25 09:00:00", "log_type": "IN", "device": "Gate-1", "name": "Asha Patel", "latitude": 23.0225, "longitude": 72.5714}]</pre>
 <p class=sub style="margin-top:8px">emp_code and punch_time are required. log_type (IN or OUT), device and name are optional.</p></section>
 <div class=bar2><button>Save</button><button class=alt formaction="{{url_for('mantra_detect')}}">Save and read columns</button><button class=alt formaction="{{url_for('test_erp')}}">Save and test ERPNext</button></div></form>
 {% endif %}
@@ -574,10 +594,10 @@ def logs_csv():
     rows, _ = query_logs(request.args, paged=False)
     out = io.StringIO()
     w = csv.writer(out)
-    w.writerow(["punch_time", "emp_code", "employee", "employee_name", "log_type", "device", "status", "attempts", "message", "checkin"])
+    w.writerow(["punch_time", "emp_code", "employee", "employee_name", "log_type", "device", "latitude", "longitude", "status", "attempts", "message", "checkin"])
     for r in rows:
         w.writerow([r["punch_time"], r["emp_code"], r["employee"], r["employee_name"], r["log_type"], r["device"],
-                    r["status"], r["attempts"], r["message"], r["checkin"]])
+                    r["latitude"], r["longitude"], r["status"], r["attempts"], r["message"], r["checkin"]])
     return Response(out.getvalue(), mimetype="text/csv", headers={"Content-Disposition": "attachment; filename=punch_logs.csv"})
 
 
@@ -601,7 +621,7 @@ def receive_punches():
         body = body.get("data", [body])
     if not isinstance(body, list):
         return jsonify(error="expected a JSON list of punches"), 400
-    new, bad = ingest(body, now())
+    new, bad = ingest(body, now(), strict=True)
     sync("webhook", fetch=False, fetched=new)  # if a sync is already running, rows stay pending for the next one
     return jsonify(received=len(body), new=new, unreadable=bad)
 

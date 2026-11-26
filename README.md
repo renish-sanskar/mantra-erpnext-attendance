@@ -17,20 +17,23 @@ It is the same app as the Easy TimePro version, with a database reader instead o
 One punch is one JSON object. Send a list of them to `/api/punches`, or let the database reader build them.
 
 ```json
-{"emp_code": "1234", "punch_time": "2026-11-25 09:00:00", "log_type": "IN", "device": "Gate-1", "name": "Asha Patel"}
+{"emp_code": "1234", "punch_time": "2026-11-25 09:00:00", "log_type": "IN", "device": "Gate-1", "name": "Asha Patel", "latitude": 23.0225, "longitude": 72.5714}
 ```
 
 | Field | Required | Meaning |
 |---|---|---|
 | `emp_code` | yes | The employee's punch code. Matched to an Employee field in ERPNext (default `attendance_device_id`) |
 | `punch_time` | yes | Local date and time. Accepted: `YYYY-MM-DD HH:MM:SS`, `YYYY-MM-DDTHH:MM:SS`, `DD-MM-YYYY HH:MM:SS`, `DD/MM/YYYY HH:MM:SS` |
-| `log_type` | no | `IN` or `OUT`. Also understood: `I`, `O`, `0` (in), `1` (out), `Check In`, `Check Out`, `Break In`, `Break Out` |
+| `log_type` | no | `IN` or `OUT` (any case). In the API any other value makes the punch unreadable. The database reader also understands `I`, `O`, `0`, `1`, `Check In`, `Check Out` |
+| `latitude` | no | Number from -90 to 90 (also `lat`). Sent to ERPNext, which fills in the Geolocation and checks the Shift Location radius when "Allow geolocation tracking" is on in HR Settings |
+| `longitude` | no | Number from -180 to 180 (also `lng`, `lon`, `long`). Send it together with `latitude` |
 | `device` | no | Machine or gate name. Sent to ERPNext as the device id |
 | `name` | no | Shown in the Punches list only |
 
 Rules:
 
 - A punch is identified by `emp_code` + `punch_time`. The same punch arriving twice is stored once.
+- If "Allow geolocation tracking" is on in ERPNext, a punch without `latitude` and `longitude` fails there ("Latitude and longitude values are required"), so Mantra machine punches would fail too.
 - If `log_type` is missing, a person's punches alternate **IN, OUT, IN…** during the day. One missed punch flips the rest of that day, so send `log_type` when the machine has it.
 - Keys are case-insensitive. Easy TimePro style keys (`PUNCH_DATETIME`, `PUNCH_STATE`, `TERMINAL_ALIAS`, `FIRST_NAME`) work too.
 
@@ -42,7 +45,7 @@ Rules:
 2. Right-click `install_windows.bat` and choose **Run as administrator**. It creates the virtual environment, adds a startup task (`MantraSync`) that starts the app at every boot, opens port 5001 and starts it now. Output goes to `app.log`.
 3. Open http://localhost:5001 → **Settings**.
 4. Under **Mantra database** enter the SQL Server (for example `.\Mantra2022`, where the dot means this PC), database, username, password and table. Press **Save and read columns**. The app lists the table's columns and its first rows, and picks the likely ones.
-5. Check the **Columns** choices: employee code and punch date/time are required, In/Out, device and name are optional. Press **Save**.
+5. Check the **Columns** choices: employee code and punch date/time are required, In/Out, device, name, latitude and longitude are optional (choose latitude and longitude together; they are sent to ERPNext). Press **Save**.
 
    **If the machine records every punch as In:** the In / Out dropdown shows the values found in each column. A column with only one value (for example `IN` on every row) says nothing about In or Out, so the app does not pick it. Leave **In / Out** at `(none)`: each person's punches then alternate **In, Out, In…** during the day (first punch In, second Out, and so on). A forgotten punch flips the rest of that day, so check the Punches list now and then.
 6. Under **ERPNext** enter the site address, API key and secret, and the Employee field that holds the punch code. Press **Save and test ERPNext**.

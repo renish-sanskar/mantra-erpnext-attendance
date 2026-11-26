@@ -161,10 +161,21 @@ assert seq == ["IN", "OUT"], seq
 # --- webhook: standard payload and Easy TimePro style
 tok = app.cfg()["webhook_token"]
 body = [{"emp_code": "2001", "punch_time": "2026-11-26 09:00:00"}, {"emp_code": "2001", "punch_time": "2026-11-26 18:00:00"},
-        {"EMP_CODE": "2002", "PUNCH_DATETIME": "26-11-2026 09:05:00", "PUNCH_STATE": "Check In"}, {"junk": 1}]
+        {"EMP_CODE": "2002", "PUNCH_DATETIME": "26-11-2026 09:05:00", "PUNCH_STATE": "in"}, {"junk": 1}]
 assert cl.post("/api/punches", json=body).status_code == 401
 r = cl.post("/api/punches?token=" + tok, json=body)
 assert r.status_code == 200 and r.json == {"received": 4, "new": 3, "unreadable": 1}, r.json
+# the API takes only IN/OUT for log_type; machine codes and out-of-range coordinates are unreadable
+bad = [{"emp_code": "2003", "punch_time": "2026-11-26 09:10:00", "log_type": v} for v in ("I", "0", "Check In", "BREAK")] + \
+      [{"emp_code": "2003", "punch_time": "2026-11-26 09:11:00", "latitude": 91, "longitude": 10},
+       {"emp_code": "2003", "punch_time": "2026-11-26 09:12:00", "latitude": "north", "longitude": 10}]
+assert cl.post("/api/punches?token=" + tok, json=bad).json == {"received": 6, "new": 0, "unreadable": 6}
+good = {"emp_code": "2003", "punch_time": "2026-11-26 09:13:00", "log_type": "out", "Lat": "23.0225", "LNG": 72.5714}
+assert cl.post("/api/punches?token=" + tok, json=[good]).json["new"] == 1
+with app.db() as d:
+    assert tuple(d.execute("SELECT log_type, latitude, longitude FROM log WHERE emp_code='2003'").fetchone()) == ("OUT", 23.0225, 72.5714)
+assert app.standardize({"emp_code": "7", "punch_time": "2026-11-26 09:00:00"})["latitude"] is None
+assert app.standardize({"emp_code": "7", "punch_time": "2026-11-26 09:00:00", "log_type": "I"})["log_type"] == "IN"  # the database reader still understands I/O
 assert cl.post("/api/punches", headers={"X-Token": tok}, json={"data": body[:1]}).json["new"] == 0  # already stored
 assert cl.post("/api/punches?token=" + tok, json="x").status_code == 400
 with app.db() as d:
@@ -223,4 +234,24 @@ app.set_cfg(m_pass="secret-pw")
 cl.post("/config", data={"m_server": "x", "m_pass": ""})
 assert app.cfg()["m_pass"] == "secret-pw" and app.cfg()["m_server"] == "x"  # blank password keeps the saved one
 assert b"secret-pw" not in cl.get("/config").data
+
+# --- latitude / longitude columns of the Mantra table
+import sqlite3
+assert app.guess([("CardNo", "varchar"), ("In_Out_Time", "datetime"), ("Latitude", "float"), ("Longitude", "float")]) == \
+    {"m_emp": "CardNo", "m_time": "In_Out_Time", "m_lat": "Latitude", "m_lng": "Longitude"}
+geo = os.path.join(tmp, "geo.db")
+g = sqlite3.connect(geo)
+g.execute("CREATE TABLE t(Code, T, Lat, Lng)")
+g.executemany("INSERT INTO t VALUES(?,?,?,?)", [("5", "2026-11-26 09:00:00", 23.5, 72.5), ("6", "2026-11-26 09:01:00", None, None)])
+g.commit()
+g.close()
+app.DB = os.path.join(tmp, "geo_cfg.db")
+app.init()
+app.set_cfg(m_server="sqlite:" + geo, m_table="t", m_emp="Code", m_time="T", m_lat="Lat", m_lng="Lng")
+rows = list(app.fetch_punches(app.cfg(), datetime(2026, 1, 1)))
+assert [(r["latitude"], r["longitude"]) for r in rows] == [(23.5, 72.5), (None, None)], rows
+assert app.ingest(rows, app.now()) == (2, 0)
+with app.db() as d:
+    assert [tuple(r) for r in d.execute("SELECT latitude, longitude FROM log ORDER BY emp_code")] == [(23.5, 72.5), (None, None)]
+assert b"Latitude" in cl.get("/config").data
 print("OK")
