@@ -86,5 +86,5 @@ The name suggests a temporary dump table that Mantra's software may refill or cl
 - The site has no login. Run it on a trusted network only.
 - The SQL password and ERPNext secret are saved in plain text in `attendance.db`, which is not part of the repository.
 - A punch is matched only to an **Active** Employee. Punches for an unknown or inactive code show as Failed ("No active Employee…") and are retried on every sync until the Employee is fixed.
-- For the usual Mantra table `dbo.tmpDmpTerminalData`, **Save and read columns** picks `CardNo` (employee code), `In_Out_Time` (punch time) and `Mode` (In/Out). Check them anyway. If a value in your table needs special handling (for example an In/Out code other than the ones listed), change `parse_state` in `app.py`.
+- For the usual Mantra table `dbo.tmpDmpTerminalData`, **Save and read columns** picks `CardNO` (employee code), `In_Out_Time` (punch time), `Mode` (In/Out), `DeviceCode`, `Latitude` and `Longitude`. `EmpCode` and `EmpID` are 0 in that table, so they are not used as the employee code. Check the choices anyway. If a value in your table needs special handling (for example an In/Out code other than the ones listed), change `parse_state` in `app.py`.
 - The ERPNext logo in `static/` belongs to its owner. The Mantra icon is a generic fingerprint drawing, not Mantra's logo.

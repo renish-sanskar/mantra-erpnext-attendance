@@ -82,7 +82,7 @@ def set_cfg(**kw):
 
 
 FIELDS = ("m_emp", "m_time", "m_state", "m_device", "m_name", "m_lat", "m_lng")
-GUESS = {"m_emp": ("empcode", "employeecode", "empid", "userid", "enroll", "cardno", "emp", "user", "pin"),
+GUESS = {"m_emp": ("cardno", "empcode", "employeecode", "empid", "userid", "enroll", "emp", "user", "pin"),  # Mantra: EmpCode and EmpID are always 0, CardNO is the real code
          "m_time": ("inouttime", "punchdatetime", "datetime", "logtime", "punchtime", "punch", "date"),
          "m_state": ("inout", "state", "status", "mode", "direction", "type"),
          "m_device": ("terminal", "device", "machine", "reader"),
@@ -170,7 +170,8 @@ def guess(cols):
         for w in words:
             for n, _ in cols:
                 low = n.lower().replace("_", "").replace(" ", "")
-                if key not in out and n not in used and w in low and (key != "m_emp" or "name" not in low):
+                if (key not in out and n not in used and w in low and (key != "m_emp" or "name" not in low)
+                        and (key != "m_state" or not ("time" in low or "date" in low))):  # InOutTime is a time, not In/Out
                     out[key] = n
                     used.add(n)
     return out
@@ -286,12 +287,17 @@ def pick(p, *keys):
     return next((p[k] for k in keys if p.get(k) not in (None, "")), None)
 
 
-def coord(v, limit):
+def coord(v, limit, strict):
     if v in (None, ""):
         return None
-    f = float(v)
-    if not -limit <= f <= limit:
-        raise ValueError(f"coordinate {v!r} out of range")
+    try:
+        f = float(v)
+        if not -limit <= f <= limit:
+            raise ValueError(f"coordinate {v!r} out of range")
+    except (ValueError, TypeError):
+        if strict:
+            raise
+        return None  # the database reader never drops a punch over a bad optional coordinate (for example the text "None")
     return f
 
 
@@ -311,7 +317,7 @@ def standardize(p, strict=False):
     return {"tx_id": f"{code}|{ts}", "emp_code": code, "punch_time": ts,
             "log_type": parse_state(lt),
             "device": txt(pick(p, "device", "device_id", "terminal_alias", "terminal_sn")),
-            "latitude": coord(pick(p, "latitude", "lat"), 90), "longitude": coord(pick(p, "longitude", "lng", "lon", "long"), 180),
+            "latitude": coord(pick(p, "latitude", "lat"), 90, strict), "longitude": coord(pick(p, "longitude", "lng", "lon", "long"), 180, strict),
             "name": txt(pick(p, "name", "employee_name")) or " ".join(filter(None, [txt(p.get("first_name")), txt(p.get("last_name"))]))}
 
 

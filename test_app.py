@@ -68,6 +68,20 @@ assert app.guess(app.Mantra(app.cfg()).columns()) == {"m_emp": "EmployeeCode", "
 
 assert app.guess([("In_Out_Time", "datetime"), ("Mode", "varchar"), ("CardNo", "varchar"), ("Attn_Dt", "datetime")]) == \
     {"m_emp": "CardNo", "m_time": "In_Out_Time", "m_state": "Mode"}  # the real Mantra tmpDmpTerminalData columns
+real = [("EmpCode", "int"), ("In_Out_Time", "datetime"), ("ShiftCode", "int"), ("Attn_Dt", "datetime"), ("Mode", "varchar"),
+        ("CreatedDate", "datetime"), ("RecDet", "int"), ("IPaddress", "varchar"), ("DeviceCode", "int"), ("Extra1", "varchar"),
+        ("EntryMode", "int"), ("AttnDt", "int"), ("InOutTime", "bigint"), ("CardNO", "int"), ("EmpID", "int"), ("Sync", "int"),
+        ("Location", "varchar"), ("Latitude", "varchar"), ("Longitude", "varchar"), ("MReason", "varchar"), ("LogImage", "image")]
+assert app.guess(real) == {"m_emp": "CardNO", "m_time": "In_Out_Time", "m_state": "Mode", "m_device": "DeviceCode",
+                           "m_lat": "Latitude", "m_lng": "Longitude"}  # EmpCode/EmpID are always 0; InOutTime is a number, not In/Out
+# the database reader keeps a punch whose coordinates are junk; the API rejects it
+junk = {"emp_code": "2", "punch_time": "2020-08-20 16:32:00", "latitude": "None", "longitude": "x"}
+assert app.standardize(junk)["latitude"] is None and app.standardize(junk)["longitude"] is None
+try:
+    app.standardize(junk, strict=True)
+    raise SystemExit("API should reject junk coordinates")
+except ValueError:
+    pass
 
 # --- employee lookup: Active only, one request per code, errors surface as ERPDown
 real_http, seen = app.http, []
